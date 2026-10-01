@@ -1,0 +1,192 @@
+"""Relational model for the simulated e-commerce company.
+
+Every row the agent can cite has a human-readable, prefixed text ID (evt_..., dep_...,
+ord_...). The prefix tells the grounding checker which table a citation points to.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+NAMING = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING)
+    type_annotation_map = {datetime: DateTime(timezone=True), dict[str, Any]: JSONB}
+
+
+# --- Org and infrastructure -------------------------------------------------------
+
+
+class Team(Base):
+    __tablename__ = "teams"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    slack_channel: Mapped[str] = mapped_column(String(64))
+    oncall_handle: Mapped[str] = mapped_column(String(64))
+
+
+class Service(Base):
+    __tablename__ = "services"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # e.g. "payments-svc"
+    kind: Mapped[str] = mapped_column(String(16))  # internal | database | external
+    tier: Mapped[int] = mapped_column(Integer)  # 1 = revenue critical
+    owner_team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"))
+    description: Mapped[str] = mapped_column(Text)
+
+
+class ServiceDependency(Base):
+    """caller -> callee. Phase 3 lifts these into the general entity graph."""
+
+    __tablename__ = "service_dependencies"
+    caller_id: Mapped[str] = mapped_column(ForeignKey("services.id"), primary_key=True)
+    callee_id: Mapped[str] = mapped_column(ForeignKey("services.id"), primary_key=True)
+    criticality: Mapped[str] = mapped_column(String(16))  # hard | soft
+
+
+class Host(Base):
+    __tablename__ = "hosts"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("services.id"), index=True)
+    region: Mapped[str] = mapped_column(String(32))
+    az: Mapped[str] = mapped_column(String(32))
+    instance_type: Mapped[str] = mapped_column(String(32))
+
+
+# --- Changes ----------------------------------------------------------------------
+
+
+class Deploy(Base):
+    __tablename__ = "deploys"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("services.id"), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    previous_version: Mapped[str] = mapped_column(String(32))
+    commit_sha: Mapped[str] = mapped_column(String(40))
+    author: Mapped[str] = mapped_column(String(64))
+    change_summary: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16))  # succeeded | rolled_back | failed
+    deployed_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class ConfigChange(Base):
+    __tablename__ = "config_changes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("services.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # feature_flag | config | infra
+    key: Mapped[str] = mapped_column(String(128))
+    old_value: Mapped[str] = mapped_column(Text)
+    new_value: Mapped[str] = mapped_column(Text)
+    changed_by: Mapped[str] = mapped_column(String(64))
+    changed_at: Mapped[datetime] = mapped_column(index=True)
+
+
+# --- Business data (customers are PII) ---------------------------------------------
+
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str] = mapped_column(String(256))
+    phone: Mapped[str] = mapped_column(String(32))
+    tier: Mapped[str] = mapped_column(String(16))  # standard | plus | enterprise
+    region: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime]
+
+
+class Order(Base):
+    __tablename__ = "orders"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16))  # completed | failed | pending
+    total_cents: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))  # captured | declined | error
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class Shipment(Base):
+    __tablename__ = "shipments"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), index=True)
+    carrier: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))  # label_created | error
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+
+
+# --- Telemetry --------------------------------------------------------------------
+
+
+class Event(Base):
+    """Logs, alerts and change notifications on one timeline."""
+
+    __tablename__ = "events"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(index=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("services.id"))
+    host_id: Mapped[str | None] = mapped_column(ForeignKey("hosts.id"))
+    kind: Mapped[str] = mapped_column(String(16))  # log | alert | deploy | config_change
+    severity: Mapped[str] = mapped_column(String(16))  # info | warning | error | critical
+    message: Mapped[str] = mapped_column(Text)
+    attributes: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+    __table_args__ = (Index("ix_events_service_ts", "service_id", "ts"),)
+
+
+class MetricPoint(Base):
+    __tablename__ = "metric_points"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("services.id"))
+    name: Mapped[str] = mapped_column(String(64))  # request_rate | error_rate | p99_latency_ms
+    ts: Mapped[datetime]
+    value: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (Index("ix_metric_points_series", "service_id", "name", "ts"),)
+
+
+# --- Eval ground truth (never exposed through MCP tools) ---------------------------
+
+
+class ScenarioRun(Base):
+    __tablename__ = "scenario_runs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    scenario_key: Mapped[str] = mapped_column(String(64))
+    seed: Mapped[int] = mapped_column(Integer)
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    ground_truth: Mapped[dict[str, Any]]
