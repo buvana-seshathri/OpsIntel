@@ -19,8 +19,8 @@ design decisions.
 | 2 | Runbook/postmortem corpus, chunking, local embeddings, hybrid search with ACLs | ✅ |
 | 3 | Entity graph (records, log and document extraction), traversal, blast radius | ✅ |
 | 4 | MCP server (12 tools), JWT auth, RBAC in the tool layer, action proposals | ✅ |
-| 5 | Agent loop, structured reports, SSE trace | next |
-| 6 | Audit log, approval queue, replay | |
+| 5 | Agent loop over MCP, structured grounded reports, API with SSE trace | ✅ |
+| 6 | Audit log, approval queue, replay | next |
 | 7 | React dashboard | |
 | 8 | Eval harness and CI gating | |
 | 9 | Terraform + AWS | |
@@ -141,6 +141,43 @@ Claude Desktop (`claude_desktop_config.json`):
 and that every evidence ID exists, then stores a pending proposal. Nothing executes until
 someone approves it (phase 6).
 
+## Investigations
+
+```bash
+# needs LLM_PROVIDER=groq and GROQ_API_KEY
+uv run opsintel investigate --scenario bad_deploy_payments --check
+```
+
+The agent (`agent/investigator.py`) has no database handle and no credentials. It
+connects to the OpsIntel MCP server as an MCP client, and the server runs each call as
+the person who asked, so the agent can't read more than they can. It is offered only the
+tools that person may call, follows a triage → gather → correlate → hypothesize →
+recommend method, and stops when it concludes or hits its tool-call budget.
+
+Context is kept small for Groq's per-minute token limits: tool results are truncated
+(3,500 characters by default) and wrapped in an explicit `untrusted-data` boundary,
+and schema titles are stripped from tool definitions.
+
+The final answer is an `InvestigationReport` (summary, root cause with entity ID and
+confidence, supported and rejected hypotheses, evidence, recommended actions, affected
+services), produced in JSON mode and validated with Pydantic, retrying once with the
+validation errors if it doesn't parse. Grounding is then checked: every cited ID must
+have appeared in a tool result the model actually saw, and any that didn't are listed
+as `unseen_ids`.
+
+API (bearer JWT):
+
+| Method | Path | |
+|---|---|---|
+| POST | `/investigations` | start one; returns its ID (202) |
+| GET | `/investigations/{id}` | status, report, grounding, token/tool/latency stats, trace |
+| GET | `/investigations/{id}/events` | Server-Sent Events: the trace live, or replayed |
+| GET | `/investigations` | your investigations (admins see all) |
+| POST | `/scenarios/{key}/load` | admin only: load a scenario |
+
+Investigations are visible only to the person who started them and to admins, since a
+report can contain anything its creator could read.
+
 ## Layout
 
 ```
@@ -152,6 +189,8 @@ backend/
     tools/       tool registry/runner (RBAC, validation, audit hook) and the tool catalog
     mcp_server/  MCP adapter: stdio and HTTP with JWT bearer auth
     auth.py      roles, permissions, JWT issue/verify
+    agent/       investigator loop, prompts, report schema, grounding check
+    investigations.py, events.py   background runs, persistence, live event bus
     llm/         provider-agnostic LLM interface (Groq/OpenAI-compatible, mock)
     rag/         corpus, chunking, embedders, ingestion, hybrid search
     simulator/   company topology, simulation engine, scenarios, loader

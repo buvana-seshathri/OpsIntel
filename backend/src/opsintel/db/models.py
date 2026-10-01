@@ -290,3 +290,23 @@ class ActionProposal(Base):
     created_at: Mapped[datetime]
     decided_by: Mapped[str | None] = mapped_column(String(64))
     decided_at: Mapped[datetime | None]
+
+
+# --- Investigations ---------------------------------------------------------------------
+
+
+class Investigation(Base):
+    __tablename__ = "investigations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    question: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16))  # running | completed | failed
+    subject: Mapped[str] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime]
+    finished_at: Mapped[datetime | None]
+    report: Mapped[dict[str, Any] | None]
+    grounding: Mapped[dict[str, Any] | None]
+    trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    stats: Mapped[dict[str, Any] | None]  # tokens, tool calls, latency, stop reason
+    error: Mapped[str | None] = mapped_column(Text)

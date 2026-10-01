@@ -173,3 +173,111 @@ def mcp(
         uvicorn.run(app_, host=host, port=port)
     else:
         raise typer.BadParameter("transport must be stdio or http")
+
+
+@app.command()
+def investigate(
+    question: Annotated[
+        str | None, typer.Argument(help="Defaults to the scenario's question")
+    ] = None,
+    scenario: Annotated[
+        str | None, typer.Option(help="Load this scenario first (replaces current data)")
+    ] = None,
+    role: Annotated[str, typer.Option(help="viewer | responder | admin")] = "responder",
+    subject: Annotated[str, typer.Option(help="Who is asking")] = "cli-user",
+    check: Annotated[bool, typer.Option(help="Compare with the scenario's ground truth")] = False,
+    max_tool_calls: Annotated[int, typer.Option(help="Tool call budget")] = 12,
+) -> None:
+    """Run an investigation in the terminal, printing the agent's steps as they happen."""
+    import json
+
+    import anyio
+    from sqlalchemy import select
+
+    from opsintel.agent.investigator import AgentConfig
+    from opsintel.auth import Principal
+    from opsintel.config import get_settings
+    from opsintel.db.models import Investigation, ScenarioRun
+    from opsintel.investigations import InvestigationService
+    from opsintel.llm import make_llm
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.tools import ToolRunner
+
+    if get_settings().llm_provider == "mock":
+        raise typer.BadParameter("LLM_PROVIDER=mock has no script; set LLM_PROVIDER=groq")
+    try:
+        make_llm()
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    if scenario:
+        if scenario not in SCENARIOS:
+            raise typer.BadParameter(f"unknown scenario {scenario!r}")
+        ds = generate(SCENARIOS[scenario], 42, datetime.now(UTC))
+        with session_scope() as s:
+            load(s, ds)
+            rebuild_graph(s)
+        question = question or ds.question
+        typer.echo(f"Loaded scenario {scenario}")
+    if not question:
+        raise typer.BadParameter("give a question or --scenario")
+
+    svc = InvestigationService(
+        ToolRunner(session_scope, make_embedder),
+        make_llm,
+        config=AgentConfig(max_tool_calls=max_tool_calls),
+    )
+
+    async def main() -> str:
+        inv_id = svc.start(question, Principal(subject, role))
+        typer.echo(f"{inv_id}: {question}\n")
+        async for e in svc.bus.subscribe(inv_id):
+            d = e["data"]
+            if e["type"] == "tool_call":
+                typer.echo(f"  -> {d['tool']}({json.dumps(d['arguments'])})")
+            elif e["type"] == "tool_result":
+                typer.echo(
+                    f"     {d['chars']} chars, {d['ids_returned']} citable IDs"
+                    + (" (truncated)" if d["truncated"] else "")
+                )
+            elif e["type"] == "tool_error":
+                typer.echo(f"     ERROR {d['error']}")
+            elif e["type"] == "thought":
+                typer.echo(f"  .. {d['text'][:300]}")
+            elif e["type"] == "failed":
+                typer.echo(f"FAILED: {d['error']}")
+        await svc.wait_all()
+        return inv_id
+
+    inv_id = anyio.run(main)
+    with session_scope() as s:
+        row = s.get(Investigation, inv_id)
+        assert row is not None
+        if row.status != "completed" or row.report is None:
+            raise typer.Exit(1)
+        report, stats, grounding = row.report, row.stats or {}, row.grounding or {}
+        truth = s.scalar(select(ScenarioRun.ground_truth)) if check else None
+    rc = report["root_cause"]
+    typer.echo(f"\nSummary: {report['summary']}")
+    typer.echo(
+        f"Root cause ({rc['kind']}, {rc['confidence']:.0%}): {rc['entity_id']} - "
+        f"{rc['description']}"
+    )
+    for a in report.get("recommended_actions", []):
+        typer.echo(f"Action: {a['type']} {a['target']} (proposal {a.get('proposal_id')})")
+    typer.echo(
+        f"Grounding: {grounding.get('seen_in_tool_results')}/{grounding.get('cited')} "
+        f"citations returned by tools; unseen {grounding.get('unseen_ids')}"
+    )
+    typer.echo(
+        f"Cost: {stats.get('prompt_tokens')} prompt + {stats.get('completion_tokens')} "
+        f"completion tokens, {stats.get('tool_calls')} tool calls, "
+        f"{stats.get('latency_ms', 0) / 1000:.1f}s"
+    )
+    if truth is not None:
+        ok = rc["entity_id"] == truth["root_cause_entity"] or (
+            truth["root_cause_kind"] == "none" and rc["kind"] == "none"
+        )
+        typer.echo(
+            f"Ground truth: {truth['root_cause_kind']} {truth['root_cause_entity']} -> "
+            f"{'MATCH' if ok else 'MISS'}"
+        )
