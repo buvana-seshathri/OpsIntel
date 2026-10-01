@@ -1,4 +1,4 @@
-.PHONY: up down install lint test migrate simulate
+.PHONY: up down install lint test migrate simulate ingest
 
 SCENARIO ?= bad_deploy_payments
 
@@ -22,3 +22,6 @@ migrate:
 
 simulate:      ## make simulate SCENARIO=payflow_outage
 	cd backend && uv run opsintel simulate $(SCENARIO)
+
+ingest:
+	cd backend && uv run opsintel ingest-docs

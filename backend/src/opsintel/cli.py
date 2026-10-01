@@ -61,3 +61,37 @@ def simulate(
     for table, n in counts.items():
         typer.echo(f"  {table:22s} {n:6d}")
     typer.echo(f"\nQuestion: {ds.question}")
+
+
+@app.command("ingest-docs")
+def ingest_docs() -> None:
+    """Chunk, embed and index the runbook/postmortem corpus (idempotent)."""
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.rag.ingest import ingest_corpus
+
+    embedder = make_embedder()
+    with session_scope() as session:
+        r = ingest_corpus(session, embedder)
+    typer.echo(
+        f"Embedder {embedder.name}: {r.added} added, {r.updated} updated, "
+        f"{r.unchanged} unchanged, {r.removed} removed, {r.chunks} chunks written"
+    )
+
+
+@app.command()
+def search(
+    query: Annotated[str, typer.Argument(help="Free-text query.")],
+    role: Annotated[str, typer.Option(help="Caller role used for document ACLs.")] = "responder",
+    k: Annotated[int, typer.Option(help="Number of results.")] = 5,
+) -> None:
+    """Hybrid search over the indexed documents."""
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.rag.search import hybrid_search
+
+    with session_scope() as session:
+        hits = hybrid_search(session, make_embedder(), query, roles=[role], k=k)
+    for h in hits:
+        typer.echo(
+            f"{h.score:.4f}  vec#{h.vector_rank or '-':<3} kw#{h.keyword_rank or '-':<3} "
+            f"{h.chunk_id}  [{h.heading}]"
+        )

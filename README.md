@@ -16,8 +16,8 @@ design decisions.
 |---|---|---|
 | 0 | Monorepo scaffold, docker-compose, lint/test CI | ✅ |
 | 1 | Data model and migrations, synthetic company, simulator with 8 incident scenarios + a healthy control | ✅ |
-| 2 | Document ingestion, embeddings, hybrid search | next |
-| 3 | Entity graph and traversal tools | |
+| 2 | Runbook/postmortem corpus, chunking, local embeddings, hybrid search with ACLs | ✅ |
+| 3 | Entity graph and traversal tools | next |
 | 4 | MCP server, JWT auth, RBAC | |
 | 5 | Agent loop, structured reports, SSE trace | |
 | 6 | Audit log, approval queue, replay | |
@@ -34,6 +34,8 @@ cp .env.example .env          # LLM_PROVIDER=mock works with no API key
 docker compose up -d db
 make install migrate
 make simulate SCENARIO=bad_deploy_payments
+make ingest                   # chunk + embed + index the runbooks
+cd backend && uv run opsintel search "PAYFLOW_POOL_EXHAUSTED payments-svc"
 make test                     # needs an opsintel_test database, see below
 ```
 
@@ -64,6 +66,18 @@ Symptoms are not hand-written. The engine simulates each service minute by minut
 errors and latency up the dependency graph, and derives metrics, alerts, logs, orders, payments
 and shipments from that one model, so the data is internally consistent.
 
+## Document search
+
+`backend/src/opsintel/rag/corpus/` holds 9 runbooks, 4 postmortems and 2 policies written for
+the scenarios. Ingestion splits them by heading, embeds each chunk locally and stores it in
+pgvector next to a full-text index. Search runs both, fuses the rankings with Reciprocal Rank
+Fusion, and filters by each document's `acl` roles inside the SQL, so restricted documents
+never leave the database for a caller without access. Chunk IDs (`chk_<doc>_<n>`) are
+citable evidence.
+
+Groq has no embeddings API, so embeddings are local: `EMBEDDER=fastembed` (default) runs
+BAAI/bge-small-en-v1.5 on CPU; `EMBEDDER=hashing` is an offline lexical fallback used by tests.
+
 ## Layout
 
 ```
@@ -72,6 +86,7 @@ backend/
     api/         FastAPI app
     db/          SQLAlchemy models, sessions
     llm/         provider-agnostic LLM interface (Groq/OpenAI-compatible, mock)
+    rag/         corpus, chunking, embedders, ingestion, hybrid search
     simulator/   company topology, simulation engine, scenarios, loader
   migrations/    Alembic
   tests/

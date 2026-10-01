@@ -9,8 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -20,8 +22,10 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+EMBEDDING_DIM = 384
 
 NAMING = {
     "ix": "ix_%(column_0_label)s",
@@ -190,3 +194,48 @@ class ScenarioRun(Base):
     window_start: Mapped[datetime]
     window_end: Mapped[datetime]
     ground_truth: Mapped[dict[str, Any]]
+
+
+# --- Documents (runbooks, postmortems, policies) -------------------------------------
+
+
+class Document(Base):
+    __tablename__ = "documents"
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)  # doc_<slug>
+    slug: Mapped[str] = mapped_column(String(80), unique=True)
+    title: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(16))  # runbook | postmortem | policy
+    services: Mapped[list[str]] = mapped_column(ARRAY(String(64)))
+    acl_roles: Mapped[list[str]] = mapped_column(ARRAY(String(32)))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    embedding_model: Mapped[str] = mapped_column(String(128))
+    chunks: Mapped[list[Chunk]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+    id: Mapped[str] = mapped_column(String(112), primary_key=True)  # chk_<slug>_<nn>
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    heading: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+    tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', heading || ' ' || content)", persisted=True),
+    )
+    document: Mapped[Document] = relationship(back_populates="chunks")
+
+    __table_args__ = (
+        Index("ix_chunks_tsv", "tsv", postgresql_using="gin"),
+        Index(
+            "ix_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )

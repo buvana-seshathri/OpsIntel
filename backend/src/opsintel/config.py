@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     llm_timeout_seconds: float = 60.0
 
+    # "fastembed" runs a real embedding model locally; "hashing" needs no download.
+    embedder: Literal["fastembed", "hashing"] = "fastembed"
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+
 
 @lru_cache
 def get_settings() -> Settings:
