@@ -112,3 +112,20 @@ async def test_large_results_are_truncated(runner: ToolRunner) -> None:
     truncated = [e for e in result.trace if e.type == "tool_result" and e.data["truncated"]]
     assert truncated
     assert all(len(m.content or "") < 600 for m in llm.calls[-1] if m.role == "tool")
+
+
+async def test_context_is_compacted_to_fit_the_budget(runner: ToolRunner) -> None:
+    llm = MockLLM(ScriptedSRE())
+    result = await agent(runner, RESPONDER, llm, context_token_budget=1500).run(
+        DS.question, DS.window_end
+    )
+    assert any(
+        "context compacted" in (e.data.get("text") or "")
+        for e in result.trace
+        if e.type == "thought"
+    )
+    # Compacted results keep their IDs, so the report is still fully grounded and correct.
+    assert result.grounding.unseen_ids == []
+    assert result.report.root_cause.entity_id == DS.ground_truth.root_cause_entity
+    last_prompt = llm.calls[-1]
+    assert any((m.content or "").startswith("<compacted") for m in last_prompt)

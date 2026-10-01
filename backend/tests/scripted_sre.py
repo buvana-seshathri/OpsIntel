@@ -11,16 +11,25 @@ from typing import Any
 from opsintel.llm import Message, ToolCall, ToolSpec
 
 
-def _results(messages: list[Message]) -> list[dict[str, Any]]:
+def _results(messages: list[Message], memory: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Parsed tool results in order. With `memory`, results seen earlier are remembered by
+    call ID, so the script still knows them after the agent compacts its context (a real
+    model carries them in its own reasoning)."""
     out = []
     for m in messages:
+        if memory is not None and m.tool_call_id in memory:
+            out.append(memory[m.tool_call_id])
+            continue
         if m.role == "tool" and m.content and not m.content.startswith("ERROR"):
             body = re.search(r">\n(.*)\n</tool_result>", m.content, re.S)
             if body:
                 try:
-                    out.append(json.loads(body.group(1)))
+                    parsed = json.loads(body.group(1))
                 except json.JSONDecodeError:
-                    out.append({})
+                    parsed = {}
+                out.append(parsed)
+                if memory is not None and m.tool_call_id:
+                    memory[m.tool_call_id] = parsed
     return out
 
 
@@ -28,12 +37,13 @@ class ScriptedSRE:
     def __init__(self, hallucinate: bool = False, propose: bool = True) -> None:
         self.hallucinate = hallucinate
         self.propose = propose
+        self.memory: dict[str, Any] = {}
 
     def __call__(self, messages: list[Message], tools: list[ToolSpec] | None) -> Message:
         if messages[-1].role == "system" and "JSON Schema" in (messages[-1].content or ""):
             return Message(role="assistant", content=json.dumps(self._report(messages)))
         done = sum(m.role == "tool" for m in messages)
-        results = _results(messages)
+        results = _results(messages, self.memory)
         plan: list[tuple[str, dict[str, Any]]] = [
             (
                 "query_events",
@@ -69,7 +79,7 @@ class ScriptedSRE:
 
     def _report(self, messages: list[Message]) -> dict[str, Any]:
         # Cite only what the tools actually returned, as the real prompt demands.
-        results = _results(messages)
+        results = _results(messages, self.memory)
         culprit = self._culprit(results)
         herring = next((c["id"] for c in self._changes(results) if c["id"] != culprit), None)
         groups = results[0].get("groups", []) if results else []

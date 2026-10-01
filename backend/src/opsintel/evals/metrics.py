@@ -169,3 +169,9 @@ def aggregate(scores: list[CaseScore]) -> dict[str, Any]:
 
 def as_rows(scores: list[CaseScore]) -> list[dict[str, Any]]:
     return [{**asdict(s), "rbac_violation": s.rbac_violation} for s in scores]
+
+
+def from_rows(rows: list[dict[str, Any]]) -> list[CaseScore]:
+    """Rebuild scores saved by `as_rows` (for resuming a suite across quota windows)."""
+    names = set(CaseScore.__dataclass_fields__)
+    return [CaseScore(**{k: v for k, v in row.items() if k in names}) for row in rows]

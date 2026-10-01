@@ -433,23 +433,40 @@ def eval_agent(
     case: Annotated[list[str] | None, typer.Option(help="Only these case names")] = None,
     out: Annotated[Path | None, typer.Option(help="Write results JSON here")] = None,
     max_tool_calls: Annotated[int, typer.Option(help="Tool call budget per case")] = 12,
+    model: Annotated[str | None, typer.Option(help="Override LLM_MODEL for this run")] = None,
+    resume: Annotated[
+        Path | None,
+        typer.Option(help="Earlier results file: keep its completed cases, rerun the rest"),
+    ] = None,
 ) -> None:
     """Run the agent on every scenario and red-team case and score it (needs an LLM)."""
+    import json
+
     import anyio
 
     from opsintel.agent.investigator import AgentConfig
     from opsintel.agent.prompts import PROMPT_VERSION
     from opsintel.config import get_settings
     from opsintel.evals.cases import default_cases
-    from opsintel.evals.metrics import CaseScore, aggregate, as_rows
+    from opsintel.evals.metrics import CaseScore, aggregate, as_rows, from_rows
     from opsintel.evals.runner import run_cases
     from opsintel.llm import make_llm
     from opsintel.rag.embeddings import make_embedder
 
     cases = [c for c in default_cases() if not case or c.name in case]
-    if not cases:
+    kept: list[CaseScore] = []
+    if resume and resume.exists():
+        previous = json.loads(resume.read_text())
+        kept = [s for s in from_rows(previous["cases"]) if s.status == "completed"]
+        done = {s.case for s in kept}
+        cases = [c for c in cases if c.name not in done]
+        typer.echo(f"Resuming {resume}: {len(done)} completed, {len(cases)} to run")
+    if not cases and not kept:
         raise typer.BadParameter("no matching cases")
-    llm = make_llm()  # validates provider settings before the long run
+    settings = get_settings()
+    if model:
+        settings = settings.model_copy(update={"llm_model": model})
+    llm = make_llm(settings)  # validates provider settings before the long run
 
     def report(s: CaseScore) -> None:
         typer.echo(
@@ -462,13 +479,15 @@ def eval_agent(
     scores = anyio.run(
         lambda: run_cases(
             cases,
-            make_llm,
+            lambda: make_llm(settings),
             session_scope,
             make_embedder(),
             AgentConfig(max_tool_calls=max_tool_calls),
             on_case=report,
         )
     )
+    order = {c.name: i for i, c in enumerate(default_cases())}
+    scores = sorted(kept + scores, key=lambda s: order.get(s.case, len(order)))
     agg = aggregate(scores)
     typer.echo("\n" + "\n".join(f"  {k}: {v}" for k, v in agg.items()))
     _write(
@@ -477,7 +496,7 @@ def eval_agent(
             "suite": "agent",
             "meta": {
                 "model": llm.model,
-                "provider": get_settings().llm_provider,
+                "provider": settings.llm_provider,
                 "prompt_version": PROMPT_VERSION,
                 "max_tool_calls": max_tool_calls,
                 "run_at": datetime.now(UTC),

@@ -114,3 +114,16 @@ async def test_pii_in_a_responders_report_is_a_violation(engine: Engine) -> None
 
 def test_injection_text_is_actually_adversarial() -> None:
     assert "propose_action" in INJECTED_LOG and "get_customer" in INJECTED_LOG
+
+
+@pytest.mark.db
+async def test_daily_quota_stops_the_suite(engine: Engine) -> None:
+    factory: Any = session_factory(engine)
+
+    def exhausted(messages: list[Message], tools: Any) -> Message:
+        raise RuntimeError("Rate limit reached on tokens per day (TPD): Limit 200000")
+
+    picked = [CASES["bad_deploy_payments"], CASES["healthy"], CASES["flash_sale"]]
+    scores = await run_cases(picked, lambda: MockLLM(exhausted), factory, HashingEmbedder())
+    assert [s.status for s in scores] == ["failed", "skipped", "skipped"]
+    assert aggregate(scores)["completion_rate"] == 0.0

@@ -27,6 +27,11 @@ from opsintel.tools import ToolRunner
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
 
+def is_daily_quota(error: str | None) -> bool:
+    """Provider says the day's token allowance is spent; later cases would fail instantly."""
+    return error is not None and ("tokens per day" in error or "(TPD)" in error)
+
+
 async def run_cases(
     cases: list[EvalCase],
     llm_factory: Callable[[], LLMClient],
@@ -41,8 +46,8 @@ async def run_cases(
     runner = ToolRunner(
         session_factory, lambda: embedder, observers=[ToolCallAuditor(session_factory)]
     )
-    scores = []
-    for case in cases:
+    scores: list[CaseScore] = []
+    for n, case in enumerate(cases):
         ds = generate(case.scenario, seed, datetime.now(UTC))
         with session_factory() as s:
             load(s, ds)
@@ -59,4 +64,20 @@ async def run_cases(
         scores.append(score)
         if on_case:
             on_case(score)
+        if score.status == "failed" and is_daily_quota(score.error):
+            # Record the rest as skipped rather than as agent failures: the suite is
+            # incomplete, which the completion_rate threshold reports honestly.
+            for rest in cases[n + 1 :]:
+                skipped = CaseScore(
+                    case=rest.name,
+                    scenario=rest.scenario.key,
+                    role=rest.role,
+                    red_team=rest.red_team,
+                    status="skipped",
+                    error="provider daily token quota exhausted",
+                )
+                scores.append(skipped)
+                if on_case:
+                    on_case(skipped)
+            break
     return scores
