@@ -387,3 +387,144 @@ def replay(investigation_id: str) -> None:
         f"{out['reproduced']}/{out['calls']} reproduced, {out['differs']} differ, "
         f"{out['skipped (write)']} writes skipped"
     )
+
+
+eval_app = typer.Typer(help="Evaluation suites and the CI gate.", no_args_is_help=True)
+app.add_typer(eval_app, name="eval")
+
+
+def _write(out: Path | None, data: dict[str, object]) -> None:
+    import json
+
+    text = json.dumps(data, indent=2, default=str)
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\n")
+        typer.echo(f"wrote {out}")
+
+
+@eval_app.command("retrieval")
+def eval_retrieval(
+    out: Annotated[Path | None, typer.Option(help="Write results JSON here")] = None,
+) -> None:
+    """Recall of the scenario runbooks for evidence queries and raw symptom questions."""
+    from opsintel.evals.retrieval import retrieval_eval
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.rag.ingest import ingest_corpus
+
+    embedder = make_embedder()
+    with session_scope() as s:
+        ingest_corpus(s, embedder)
+        result = retrieval_eval(s, embedder)
+    for c in result["cases"]:
+        typer.echo(
+            f"  {c['scenario']:26s} evidence rank {c['evidence_rank']}  "
+            f"symptom rank {c['symptom_rank']}"
+        )
+    typer.echo(
+        f"evidence recall@3 {result['evidence_recall_at_3']:.2f}  "
+        f"symptom recall@5 {result['symptom_recall_at_5']:.2f}  ({result['embedder']})"
+    )
+    _write(out, {"suite": "retrieval", "metrics": result})
+
+
+@eval_app.command("agent")
+def eval_agent(
+    case: Annotated[list[str] | None, typer.Option(help="Only these case names")] = None,
+    out: Annotated[Path | None, typer.Option(help="Write results JSON here")] = None,
+    max_tool_calls: Annotated[int, typer.Option(help="Tool call budget per case")] = 12,
+) -> None:
+    """Run the agent on every scenario and red-team case and score it (needs an LLM)."""
+    import anyio
+
+    from opsintel.agent.investigator import AgentConfig
+    from opsintel.agent.prompts import PROMPT_VERSION
+    from opsintel.config import get_settings
+    from opsintel.evals.cases import default_cases
+    from opsintel.evals.metrics import CaseScore, aggregate, as_rows
+    from opsintel.evals.runner import run_cases
+    from opsintel.llm import make_llm
+    from opsintel.rag.embeddings import make_embedder
+
+    cases = [c for c in default_cases() if not case or c.name in case]
+    if not cases:
+        raise typer.BadParameter("no matching cases")
+    llm = make_llm()  # validates provider settings before the long run
+
+    def report(s: CaseScore) -> None:
+        typer.echo(
+            f"  {s.case:28s} {s.status:9s} root_cause={'Y' if s.root_cause_correct else 'n'} "
+            f"action={'Y' if s.action_correct else 'n'} grounded={s.grounded_exist:.2f} "
+            f"tools={s.tool_calls} violation={'YES' if s.rbac_violation else 'no'} "
+            f"{s.latency_s:.0f}s"
+        )
+
+    scores = anyio.run(
+        lambda: run_cases(
+            cases,
+            make_llm,
+            session_scope,
+            make_embedder(),
+            AgentConfig(max_tool_calls=max_tool_calls),
+            on_case=report,
+        )
+    )
+    agg = aggregate(scores)
+    typer.echo("\n" + "\n".join(f"  {k}: {v}" for k, v in agg.items()))
+    _write(
+        out,
+        {
+            "suite": "agent",
+            "meta": {
+                "model": llm.model,
+                "provider": get_settings().llm_provider,
+                "prompt_version": PROMPT_VERSION,
+                "max_tool_calls": max_tool_calls,
+                "run_at": datetime.now(UTC),
+            },
+            "metrics": agg,
+            "cases": as_rows(scores),
+        },
+    )
+
+
+@eval_app.command("gate")
+def eval_gate(
+    results: Annotated[list[Path], typer.Argument(help="Result files from eval runs")],
+    summary: Annotated[
+        Path | None, typer.Option(help="Append a Markdown summary here ($GITHUB_STEP_SUMMARY)")
+    ] = None,
+) -> None:
+    """Fail (exit 1) if any result misses its threshold in evals/thresholds.json."""
+    import json
+
+    from opsintel.evals.gate import check, load_thresholds
+
+    limits = load_thresholds()
+    failures: list[str] = []
+    lines = [
+        "## OpsIntel evals",
+        "",
+        "| suite | metric | value | threshold | |",
+        "|---|---|---|---|---|",
+    ]
+    for path in results:
+        data = json.loads(path.read_text())
+        suite = data["suite"]
+        suite_limits = limits.get(suite, {})
+        failed = check(data["metrics"], suite_limits)
+        failures += [f"{suite}: {f}" for f in failed]
+        for name, bound in suite_limits.items():
+            value = data["metrics"].get(name)
+            ok = not any(f.startswith(f"{name} ") or f.startswith(f"{name}:") for f in failed)
+            limit = " ".join(f"{k} {v}" for k, v in bound.items())
+            lines.append(f"| {suite} | {name} | {value} | {limit} | {'✅' if ok else '❌'} |")
+    text = "\n".join(lines) + "\n"
+    typer.echo(text)
+    if summary:
+        with summary.open("a") as f:
+            f.write(text)
+    if failures:
+        typer.echo("GATE FAILED:\n  " + "\n  ".join(failures))
+        raise typer.Exit(1)
+    typer.echo("Gate passed.")

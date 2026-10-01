@@ -4,9 +4,19 @@ on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"  # weekly live agent eval
+
+env:
+  TEST_DATABASE_URL: postgresql+psycopg://opsintel:opsintel@localhost:5432/opsintel_test
+  DATABASE_URL: postgresql+psycopg://opsintel:opsintel@localhost:5432/opsintel_test
+  FASTEMBED_CACHE_PATH: /home/runner/.cache/fastembed
 
 jobs:
   backend:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,9 +34,7 @@ jobs:
           --health-interval 2s
           --health-retries 30
     env:
-      TEST_DATABASE_URL: postgresql+psycopg://opsintel:opsintel@localhost:5432/opsintel_test
       RUN_FASTEMBED: "1"
-      FASTEMBED_CACHE_PATH: /home/runner/.cache/fastembed
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -44,3 +52,64 @@ jobs:
         run: uv run mypy src
       - name: Tests
         run: uv run pytest -v
+      - name: Retrieval eval (real embedding model)
+        run: |
+          uv run opsintel migrate
+          uv run opsintel eval retrieval --out ../evals/results/ci-retrieval.json
+      - name: Eval gate
+        run: uv run opsintel eval gate ../evals/results/ci-retrieval.json --summary "$GITHUB_STEP_SUMMARY"
+
+  # Live LLM evals take about an hour on Groq's free tier, so they run on demand, weekly,
+  # or on pull requests labelled `run-evals`, and gate those runs on evals/thresholds.json.
+  agent-evals:
+    if: >-
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+      contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: opsintel
+          POSTGRES_PASSWORD: opsintel
+          POSTGRES_DB: opsintel_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U opsintel -d opsintel_test"
+          --health-interval 2s
+          --health-retries 30
+    env:
+      LLM_PROVIDER: groq
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the Groq secret
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "::error::Add GROQ_API_KEY under Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: fastembed-bge-small-en-v1.5
+      - name: Agent eval
+        run: |
+          uv run opsintel migrate
+          uv run opsintel eval agent --out ../evals/results/ci-agent.json
+      - name: Eval gate
+        run: uv run opsintel eval gate ../evals/results/ci-agent.json --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-eval-results
+          path: evals/results/ci-agent.json

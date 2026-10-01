@@ -188,7 +188,7 @@ class MetricPoint(Base):
 
 class ScenarioRun(Base):
     __tablename__ = "scenario_runs"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
     scenario_key: Mapped[str] = mapped_column(String(64))
     seed: Mapped[int] = mapped_column(Integer)
     window_start: Mapped[datetime]

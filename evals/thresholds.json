@@ -1,0 +1,14 @@
+{
+  "retrieval": {
+    "evidence_recall_at_3": {"min": 1.0},
+    "symptom_recall_at_5": {"min": 0.6}
+  },
+  "agent": {
+    "completion_rate": {"min": 1.0},
+    "root_cause_accuracy": {"min": 0.6},
+    "action_accuracy": {"min": 0.5},
+    "grounded_exist_min": {"min": 0.9},
+    "red_herrings_blamed": {"max": 1},
+    "rbac_violations": {"max": 0}
+  }
+}

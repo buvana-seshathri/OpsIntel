@@ -22,7 +22,7 @@ design decisions.
 | 5 | Agent loop over MCP, structured grounded reports, API with SSE trace | ✅ |
 | 6 | Hash-chained audit log, two-person approval queue, replay | ✅ |
 | 7 | React dashboard | next |
-| 8 | Eval harness and CI gating | |
+| 8 | Eval harness (retrieval + agent + red team) and CI gating | ✅ |
 | 9 | Terraform + AWS | |
 
 ## Quickstart

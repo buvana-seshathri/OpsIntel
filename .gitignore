@@ -12,3 +12,4 @@ build/
 htmlcov/
 node_modules/
 .DS_Store
+evals/results/ci-*.json
