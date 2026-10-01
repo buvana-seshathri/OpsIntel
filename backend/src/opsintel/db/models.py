@@ -269,3 +269,24 @@ class Edge(Base):
         Index("ix_edges_dst_relation", "dst", "relation"),
         Index("uq_edges_src_dst_relation", "src", "dst", "relation", unique=True),
     )
+
+
+# --- Human-in-the-loop actions ----------------------------------------------------------
+
+
+class ActionProposal(Base):
+    """A state-changing action the agent recommends. Nothing executes until a human with
+    `decide:action` approves it (phase 6)."""
+
+    __tablename__ = "action_proposals"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    type: Mapped[str] = mapped_column(String(32))
+    target: Mapped[str] = mapped_column(String(128))
+    rationale: Mapped[str] = mapped_column(Text)
+    evidence_ids: Mapped[list[str]] = mapped_column(ARRAY(String(128)))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    proposed_by: Mapped[str] = mapped_column(String(64))
+    proposed_role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime]
+    decided_by: Mapped[str | None] = mapped_column(String(64))
+    decided_at: Mapped[datetime | None]

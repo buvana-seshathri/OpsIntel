@@ -123,3 +123,53 @@ def graph(
                 "blast_radius": blast_radius(session, entity),
             }
     typer.echo(json.dumps(out, indent=2, default=str))
+
+
+@app.command()
+def token(
+    subject: Annotated[str, typer.Argument(help="Who the token identifies, e.g. alice")],
+    role: Annotated[str, typer.Option(help="viewer | responder | admin")] = "responder",
+    ttl_hours: Annotated[int, typer.Option(help="Lifetime in hours")] = 12,
+) -> None:
+    """Mint a signed access token (development: there is no login service yet)."""
+    from opsintel.auth import issue_token
+
+    typer.echo(issue_token(subject, role, ttl_seconds=ttl_hours * 3600))
+
+
+@app.command()
+def mcp(
+    transport: Annotated[str, typer.Option(help="stdio | http")] = "stdio",
+    port: Annotated[int, typer.Option(help="HTTP port")] = 8001,
+    host: Annotated[str, typer.Option(help="HTTP bind address")] = "127.0.0.1",
+) -> None:
+    """Serve the OpsIntel tools over MCP.
+
+    stdio (Claude Desktop, local agents): identity comes from the OPSINTEL_TOKEN environment
+    variable, verified once at startup. http: every request must carry a bearer token.
+    """
+    import os
+
+    import anyio
+    import uvicorn
+
+    from opsintel.auth import AuthError, verify_token
+    from opsintel.mcp_server.server import create_server
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.tools import ToolRunner
+
+    runner = ToolRunner(session_scope, make_embedder)
+    if transport == "stdio":
+        raw = os.environ.get("OPSINTEL_TOKEN")
+        if not raw:
+            raise typer.BadParameter("set OPSINTEL_TOKEN (see `opsintel token`)")
+        try:
+            principal = verify_token(raw)
+        except AuthError as e:
+            raise typer.BadParameter(str(e)) from e
+        anyio.run(create_server(runner, principal).run_stdio_async)
+    elif transport == "http":
+        app_ = create_server(runner, http_auth=True).streamable_http_app()
+        uvicorn.run(app_, host=host, port=port)
+    else:
+        raise typer.BadParameter("transport must be stdio or http")

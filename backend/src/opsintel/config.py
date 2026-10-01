@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     embedder: Literal["fastembed", "hashing"] = "fastembed"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
 
+    # HS256 signing key for access tokens. The default is for local development only.
+    jwt_secret: SecretStr = SecretStr("dev-only-insecure-secret-change-me-0123456789")
+    jwt_issuer: str = "opsintel"
+    jwt_audience: str = "opsintel-mcp"
+    mcp_base_url: str = "http://localhost:8001"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -24,5 +24,19 @@ services:
       db:
         condition: service_healthy
 
+  mcp:
+    build: ./backend
+    command: ["opsintel", "mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "8001"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://opsintel:opsintel@db:5432/opsintel
+      MCP_BASE_URL: http://localhost:8001
+    ports: ["8001:8001"]
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   pgdata:

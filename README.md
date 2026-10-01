@@ -18,8 +18,8 @@ design decisions.
 | 1 | Data model and migrations, synthetic company, simulator with 8 incident scenarios + a healthy control | ✅ |
 | 2 | Runbook/postmortem corpus, chunking, local embeddings, hybrid search with ACLs | ✅ |
 | 3 | Entity graph (records, log and document extraction), traversal, blast radius | ✅ |
-| 4 | MCP server, JWT auth, RBAC | next |
-| 5 | Agent loop, structured reports, SSE trace | |
+| 4 | MCP server (12 tools), JWT auth, RBAC in the tool layer, action proposals | ✅ |
+| 5 | Agent loop, structured reports, SSE trace | next |
 | 6 | Audit log, approval queue, replay | |
 | 7 | React dashboard | |
 | 8 | Eval harness and CI gating | |
@@ -97,6 +97,50 @@ whether every hop is a hard dependency (failure propagates) or not (degrades onl
 `find_path` is a bounded BFS. Try `uv run opsintel graph host:payments-svc-02` after loading
 `host_disk_full`.
 
+## MCP server and access control
+
+`opsintel mcp` serves 12 tools over MCP:
+
+| Tool | Permission | Purpose |
+|---|---|---|
+| `list_services` | read:telemetry | service catalogue, owners, dependencies |
+| `query_events` | read:telemetry | logs/alerts/changes; filters and `group_by` (error_code, host, ...) |
+| `get_metrics` | read:telemetry | bucketed series + baseline vs last 10 min + change point |
+| `list_changes` | read:telemetry | deploys and config/flag changes |
+| `get_entity`, `trace_dependencies`, `blast_radius`, `find_path` | read:graph | entity graph |
+| `search_docs` | read:docs | hybrid search, filtered by document ACL |
+| `query_orders` | read:orders | order outcomes grouped by reason/region/tier; customer IDs only |
+| `get_customer` | read:pii | customer contact details |
+| `propose_action` | propose:action | queue rollback/failover/drain/... for human approval |
+
+Roles: **viewer** (all reads except PII), **responder** (+ propose and decide actions),
+**admin** (+ PII). Checks happen in `ToolRunner.call`, which every transport goes through,
+using the identity of the person who started the investigation. The model never chooses
+its role, so nothing in a prompt, document or log line can widen access. Restricted
+documents are filtered out of search results and graph lookups as well.
+
+Identity: over HTTP each request carries a bearer JWT (`opsintel token alice --role
+responder` mints one for development); over stdio the token is read from `OPSINTEL_TOKEN`
+once at startup.
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "opsintel": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/OpsIntel/backend", "run", "opsintel", "mcp"],
+      "env": {"OPSINTEL_TOKEN": "<output of opsintel token you --role viewer>"}
+    }
+  }
+}
+```
+
+`propose_action` checks that the target matches the action (a rollback needs a `dep_` ID)
+and that every evidence ID exists, then stores a pending proposal. Nothing executes until
+someone approves it (phase 6).
+
 ## Layout
 
 ```
@@ -105,6 +149,9 @@ backend/
     api/         FastAPI app
     db/          SQLAlchemy models, sessions
     graph/       entity graph builder and traversal queries
+    tools/       tool registry/runner (RBAC, validation, audit hook) and the tool catalog
+    mcp_server/  MCP adapter: stdio and HTTP with JWT bearer auth
+    auth.py      roles, permissions, JWT issue/verify
     llm/         provider-agnostic LLM interface (Groq/OpenAI-compatible, mock)
     rag/         corpus, chunking, embedders, ingestion, hybrid search
     simulator/   company topology, simulation engine, scenarios, loader
