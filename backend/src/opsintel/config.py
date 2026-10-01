@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://opsintel:opsintel@localhost:5432/opsintel"
 
     llm_provider: Literal["mock", "groq", "openai"] = "mock"
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-120b"
     groq_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     llm_timeout_seconds: float = 60.0

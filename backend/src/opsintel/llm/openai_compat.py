@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from opsintel.llm.base import LLMResponse, Message, ToolCall, ToolSpec, Usage
 
@@ -26,7 +26,7 @@ class OpenAICompatClient:
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
-            max_retries=3,  # backs off on 429/5xx, which free-tier Groq returns often
+            max_retries=6,  # backs off on 429/5xx; free-tier Groq rate-limits per minute
         )
 
     async def complete(
@@ -57,7 +57,20 @@ class OpenAICompatClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         start = time.perf_counter()
-        resp = await self._client.chat.completions.create(**kwargs)
+        try:
+            resp = await self._client.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            failed = _failed_tool_generation(e)
+            if failed is None or tools:
+                raise
+            # Groq rejects a reply that calls a tool when none were offered (seen with
+            # gpt-oss when asked for the final JSON). Hand it back as an ordinary invalid
+            # answer so the caller's repair loop can ask again.
+            return LLMResponse(
+                message=Message(role="assistant", content=f"[attempted tool call] {failed}"),
+                model=self.model,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
         latency_ms = (time.perf_counter() - start) * 1000
 
         choice = resp.choices[0].message
@@ -76,6 +89,14 @@ class OpenAICompatClient:
             usage=usage,
             latency_ms=latency_ms,
         )
+
+
+def _failed_tool_generation(e: BadRequestError) -> str | None:
+    body = e.body if isinstance(e.body, dict) else {}
+    err = body.get("error", body)
+    if isinstance(err, dict) and err.get("code") == "tool_use_failed":
+        return str(err.get("failed_generation", ""))
+    return None
 
 
 def _parse_args(raw: str | None) -> dict[str, Any]:

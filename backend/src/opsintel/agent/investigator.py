@@ -149,7 +149,9 @@ class Investigator:
                     messages.append(Message(role="tool", tool_call_id=call.id, content=text))
 
         messages.append(Message(role="user", content=FINAL_REPORT_PROMPT))
-        report, responses = await complete_structured(self.llm, messages, InvestigationReport)
+        report, responses = await complete_structured(
+            self.llm, messages, InvestigationReport, max_repairs=2
+        )
         for r in responses:
             run.count(r.usage)
         grounding = check_grounding(report, run.seen_ids)

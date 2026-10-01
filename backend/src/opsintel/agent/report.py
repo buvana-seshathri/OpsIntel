@@ -46,9 +46,15 @@ class RootCause(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+ActionType = Literal[
+    "rollback_deploy", "revert_config_change", "failover_provider", "rotate_certificate",
+    "drain_host", "scale_service", "page_team",
+]
+
+
 class RecommendedAction(BaseModel):
-    type: str
-    target: str
+    type: ActionType
+    target: str = Field(description="dep_/cfg_ ID, or service:/host:/team: entity")
     rationale: str
     evidence_ids: list[str] = []
     proposal_id: str | None = Field(

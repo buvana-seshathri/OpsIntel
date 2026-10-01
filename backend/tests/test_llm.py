@@ -105,3 +105,22 @@ def test_make_llm_requires_key_for_groq() -> None:
     llm = make_llm(Settings(llm_provider="groq", groq_api_key=SecretStr("gsk_test")))
     assert isinstance(llm, OpenAICompatClient)
     assert isinstance(make_llm(Settings(llm_provider="mock")), MockLLM)
+
+
+async def test_tool_call_without_tools_becomes_repairable_text(monkeypatch: Any) -> None:
+    import httpx2
+    from openai import BadRequestError
+
+    client = OpenAICompatClient(model="m", api_key="k", base_url="http://unused")
+    body = {"error": {"code": "tool_use_failed", "failed_generation": '{"name": "x"}'}}
+
+    async def reject(**kwargs: Any) -> Any:
+        request = httpx2.Request("POST", "http://unused")
+        raise BadRequestError("tool use", response=httpx2.Response(400, request=request), body=body)
+
+    monkeypatch.setattr(client._client.chat.completions, "create", reject)
+    resp = await client.complete([Message(role="user", content="json please")], json_mode=True)
+    assert resp.message.content == '[attempted tool call] {"name": "x"}'
+    tool = ToolSpec(name="x", description="d", parameters={"type": "object"})
+    with pytest.raises(BadRequestError):  # with tools offered it is a real error
+        await client.complete([Message(role="user", content="go")], tools=[tool])

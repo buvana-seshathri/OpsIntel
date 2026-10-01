@@ -98,7 +98,10 @@ async def complete_structured(
                 resp.message,
                 Message(
                     role="user",
-                    content=f"That JSON was invalid:\n{e}\nReturn a corrected JSON object only.",
+                    content=(
+                        f"That was not a valid answer:\n{e}\nTools are not available now. "
+                        "Return the JSON object only."
+                    ),
                 ),
             ]
     raise StructuredOutputError(f"{schema.__name__} not produced after {max_repairs + 1} attempts")
