@@ -47,8 +47,13 @@ class RootCause(BaseModel):
 
 
 ActionType = Literal[
-    "rollback_deploy", "revert_config_change", "failover_provider", "rotate_certificate",
-    "drain_host", "scale_service", "page_team",
+    "rollback_deploy",
+    "revert_config_change",
+    "failover_provider",
+    "rotate_certificate",
+    "drain_host",
+    "scale_service",
+    "page_team",
 ]
 
 

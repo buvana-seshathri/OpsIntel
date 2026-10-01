@@ -290,6 +290,10 @@ class ActionProposal(Base):
     created_at: Mapped[datetime]
     decided_by: Mapped[str | None] = mapped_column(String(64))
     decided_at: Mapped[datetime | None]
+    decision_comment: Mapped[str | None] = mapped_column(Text)
+    investigation_id: Mapped[str | None] = mapped_column(String(32))
+    executed_at: Mapped[datetime | None]
+    execution_result: Mapped[str | None] = mapped_column(Text)
 
 
 # --- Investigations ---------------------------------------------------------------------
@@ -310,3 +314,22 @@ class Investigation(Base):
     trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     stats: Mapped[dict[str, Any] | None]  # tokens, tool calls, latency, stop reason
     error: Mapped[str | None] = mapped_column(Text)
+
+
+# --- Audit log ------------------------------------------------------------------------------
+
+
+class AuditRecord(Base):
+    """Append-only and hash-chained: each row's hash covers its content and the previous
+    row's hash. A database trigger rejects UPDATE and DELETE (migration 0006)."""
+
+    __tablename__ = "audit_log"
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime]
+    kind: Mapped[str] = mapped_column(String(32))  # tool_call | llm_call | investigation | ...
+    actor: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(16))
+    investigation_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]]
+    prev_hash: Mapped[str] = mapped_column(String(64))
+    hash: Mapped[str] = mapped_column(String(64), unique=True)

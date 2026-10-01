@@ -153,12 +153,13 @@ def mcp(
     import anyio
     import uvicorn
 
+    from opsintel.audit import ToolCallAuditor
     from opsintel.auth import AuthError, verify_token
     from opsintel.mcp_server.server import create_server
     from opsintel.rag.embeddings import make_embedder
     from opsintel.tools import ToolRunner
 
-    runner = ToolRunner(session_scope, make_embedder)
+    runner = ToolRunner(session_scope, make_embedder, observers=[ToolCallAuditor(session_scope)])
     if transport == "stdio":
         raw = os.environ.get("OPSINTEL_TOKEN")
         if not raw:
@@ -221,8 +222,10 @@ def investigate(
     if not question:
         raise typer.BadParameter("give a question or --scenario")
 
+    from opsintel.audit import ToolCallAuditor
+
     svc = InvestigationService(
-        ToolRunner(session_scope, make_embedder),
+        ToolRunner(session_scope, make_embedder, observers=[ToolCallAuditor(session_scope)]),
         make_llm,
         config=AgentConfig(max_tool_calls=max_tool_calls),
     )
@@ -281,3 +284,106 @@ def investigate(
             f"Ground truth: {truth['root_cause_kind']} {truth['root_cause_entity']} -> "
             f"{'MATCH' if ok else 'MISS'}"
         )
+
+
+audit_app = typer.Typer(help="Inspect and verify the audit log.", no_args_is_help=True)
+app.add_typer(audit_app, name="audit")
+
+
+@audit_app.command("verify")
+def audit_verify() -> None:
+    """Recompute the hash chain; exits 1 if any record was changed, removed or reordered."""
+    from opsintel.audit import verify_chain
+
+    with session_scope() as s:
+        r = verify_chain(s)
+    if r.ok:
+        typer.echo(f"OK: {r.records} records, chain head {r.head}")
+    else:
+        typer.echo(f"BROKEN at seq {r.first_bad_seq}: {r.reason}")
+        raise typer.Exit(1)
+
+
+@audit_app.command("head")
+def audit_head() -> None:
+    """Print the latest hash, to anchor somewhere outside this database."""
+    from opsintel.audit import head
+
+    with session_scope() as s:
+        typer.echo(head(s))
+
+
+actions_app = typer.Typer(help="The human approval queue.", no_args_is_help=True)
+app.add_typer(actions_app, name="actions")
+
+
+@actions_app.command("list")
+def actions_list(
+    status: Annotated[str | None, typer.Option(help="pending | executed | ...")] = "pending",
+) -> None:
+    """List proposed actions."""
+    from opsintel.actions import list_proposals
+    from opsintel.auth import Principal
+
+    with session_scope() as s:
+        for p in list_proposals(s, Principal("cli", "admin"), status):
+            typer.echo(
+                f"{p.id}  {p.status:9s} {p.type} {p.target}  by {p.proposed_by}"
+                f"  ({p.investigation_id})\n    {p.rationale[:200]}"
+            )
+
+
+def _decide_cli(
+    proposal_id: str, approve: bool, subject: str, role: str, comment: str | None
+) -> None:
+    from opsintel import actions
+    from opsintel.auth import Principal
+
+    try:
+        with session_scope() as s:
+            p = actions.decide(s, Principal(subject, role), proposal_id, approve, comment)
+            result = f" - {p.execution_result}" if p.execution_result else ""
+            typer.echo(f"{p.id}: {p.status}{result}")
+    except actions.ActionError as e:
+        typer.echo(f"refused: {e}")
+        raise typer.Exit(1) from e
+
+
+@actions_app.command("approve")
+def actions_approve(
+    proposal_id: str,
+    subject: Annotated[str, typer.Option("--as", help="Who is approving")],
+    role: Annotated[str, typer.Option(help="responder | admin")] = "responder",
+    comment: Annotated[str | None, typer.Option(help="Why")] = None,
+) -> None:
+    """Approve (and execute) a pending action."""
+    _decide_cli(proposal_id, True, subject, role, comment)
+
+
+@actions_app.command("reject")
+def actions_reject(
+    proposal_id: str,
+    subject: Annotated[str, typer.Option("--as", help="Who is rejecting")],
+    role: Annotated[str, typer.Option(help="responder | admin")] = "responder",
+    comment: Annotated[str | None, typer.Option(help="Why")] = None,
+) -> None:
+    """Reject a pending action."""
+    _decide_cli(proposal_id, False, subject, role, comment)
+
+
+@app.command()
+def replay(investigation_id: str) -> None:
+    """Re-run an investigation's recorded tool calls and check each result is identical."""
+    from opsintel.audit import ToolCallAuditor
+    from opsintel.rag.embeddings import make_embedder
+    from opsintel.replay import replay_investigation
+    from opsintel.tools import ToolRunner
+
+    runner = ToolRunner(session_scope, make_embedder, observers=[ToolCallAuditor(session_scope)])
+    out = replay_investigation(session_scope, runner, investigation_id)
+    for d in out["details"]:
+        typer.echo(f"  #{d['seq']:<5} {d['tool']:20s} {d['outcome']}")
+    typer.echo(
+        f"{out['reproduced']}/{out['calls']} reproduced, {out['differs']} differ, "
+        f"{out['skipped (write)']} writes skipped"
+    )

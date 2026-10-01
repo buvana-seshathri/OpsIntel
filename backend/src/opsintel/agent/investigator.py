@@ -16,14 +16,21 @@ from typing import Any, Literal
 
 from mcp import Client
 
-from opsintel.agent.prompts import FINAL_REPORT_PROMPT, SYSTEM_PROMPT
+from opsintel.agent.prompts import FINAL_REPORT_PROMPT, PROMPT_VERSION, SYSTEM_PROMPT
 from opsintel.agent.report import Grounding, InvestigationReport, check_grounding, ids_in
 from opsintel.auth import Principal
-from opsintel.llm import LLMClient, Message, ToolSpec, Usage, complete_structured
+from opsintel.llm import LLMClient, LLMResponse, Message, ToolSpec, Usage, complete_structured
 from opsintel.tools import REGISTRY
 
 EventType = Literal[
-    "started", "thought", "tool_call", "tool_result", "tool_error", "report", "failed"
+    "started",
+    "llm_call",
+    "thought",
+    "tool_call",
+    "tool_result",
+    "tool_error",
+    "report",
+    "failed",
 ]
 
 
@@ -80,7 +87,16 @@ class _Run:
         if self.on_event:
             self.on_event(event)
 
-    def count(self, usage: Usage) -> None:
+    def count(self, resp: LLMResponse, purpose: str) -> None:
+        usage = resp.usage
+        self.emit(
+            "llm_call",
+            model=resp.model,
+            purpose=purpose,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            latency_ms=round(resp.latency_ms, 1),
+        )
         self.llm_calls += 1
         self.usage = Usage(
             prompt_tokens=self.usage.prompt_tokens + usage.prompt_tokens,
@@ -118,6 +134,7 @@ class Investigator:
             subject=self.principal.subject,
             role=self.principal.role,
             model=self.llm.model,
+            prompt_version=PROMPT_VERSION,
         )
 
         async with Client(self.mcp_server) as client:
@@ -136,7 +153,7 @@ class Investigator:
                     stop = "tool_budget"
                     break
                 resp = await self.llm.complete(messages, tools=specs)
-                run.count(resp.usage)
+                run.count(resp, "step")
                 messages.append(resp.message)
                 if resp.message.content:
                     run.emit("thought", text=resp.message.content)
@@ -153,7 +170,7 @@ class Investigator:
             self.llm, messages, InvestigationReport, max_repairs=2
         )
         for r in responses:
-            run.count(r.usage)
+            run.count(r, "report")
         grounding = check_grounding(report, run.seen_ids)
         run.emit("report", report=report.model_dump(), grounding=grounding.model_dump())
         return InvestigationResult(

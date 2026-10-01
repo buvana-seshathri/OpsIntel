@@ -120,6 +120,12 @@ class ToolCallRecord:
     result: Any = field(default=None, repr=False)
 
 
+def digest(result: Any) -> str:
+    """sha256 of a tool result's canonical JSON; replay compares these."""
+    canonical = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def simulated_now(session: Session) -> datetime:
     """The end of the loaded scenario window, so "the last 20 minutes" means the same
     thing whenever a scenario is replayed. Falls back to wall-clock time."""
@@ -179,10 +185,9 @@ class ToolRunner:
             with self._session_factory() as session:
                 ctx = ToolContext(session, principal, simulated_now(session), self._get_embedder)
                 result = to_jsonable_python(definition.fn(ctx, **dict(args)))
-            canonical = json.dumps(result, sort_keys=True, separators=(",", ":"))
             record.ok = True
             record.result = result
-            record.result_digest = hashlib.sha256(canonical.encode()).hexdigest()
+            record.result_digest = digest(result)
             return result
         except ToolError as e:
             record.error = f"{type(e).__name__}: {e}"

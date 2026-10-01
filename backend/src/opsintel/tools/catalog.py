@@ -15,6 +15,7 @@ from sqlalchemy import Float, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from opsintel.auth import Permission
+from opsintel.context import current
 from opsintel.db import models as m
 from opsintel.graph import queries as gq
 from opsintel.grounding import existing_ids
@@ -538,6 +539,7 @@ def propose_action(
         status="pending",
         proposed_by=ctx.principal.subject,
         proposed_role=ctx.principal.role,
+        investigation_id=current().investigation_id,
         created_at=ctx.now,
     )
     session.add(proposal)

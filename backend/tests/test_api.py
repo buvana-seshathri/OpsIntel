@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
 from opsintel.api.main import app
+from opsintel.audit import ToolCallAuditor
 from opsintel.auth import issue_token
 from opsintel.investigations import InvestigationService
 from opsintel.llm import MockLLM
@@ -32,7 +33,7 @@ def client(engine: Engine) -> Iterator[TestClient]:
     load_world(engine)
     factory: Any = session_factory(engine)
     app.state.investigations = InvestigationService(
-        ToolRunner(factory, HashingEmbedder),
+        ToolRunner(factory, HashingEmbedder, observers=[ToolCallAuditor(factory)]),
         lambda: MockLLM(ScriptedSRE(), model="scripted-sre"),
         session_factory=factory,
     )
@@ -119,3 +120,42 @@ def test_failed_investigation_is_recorded(client: TestClient) -> None:
 def test_only_admins_load_scenarios(client: TestClient) -> None:
     resp = client.post("/scenarios/healthy/load", headers=auth("rita", "responder"))
     assert resp.status_code == 403
+
+
+@pytest.mark.db
+def test_approval_and_audit_over_http(client: TestClient) -> None:
+    rita, bob, ada = auth("rita", "responder"), auth("bob", "responder"), auth("ada", "admin")
+    inv_id = client.post("/investigations", json={"question": DS.question}, headers=rita).json()[
+        "id"
+    ]
+    wait_done(client, inv_id, rita)
+
+    before = client.post(f"/investigations/{inv_id}/replay", headers=rita).json()
+    assert (before["reproduced"], before["differs"]) == (3, 0)
+
+    pending = client.get("/actions?status=pending", headers=bob).json()
+    proposal = next(p for p in pending if p["investigation_id"] == inv_id)
+    assert client.post(f"/actions/{proposal['id']}/approve", headers=rita).status_code == 403
+    approved = client.post(
+        f"/actions/{proposal['id']}/approve",
+        headers=bob,
+        json={"comment": "runbook says roll back"},
+    )
+    assert approved.status_code == 200 and approved.json()["status"] == "executed"
+    assert client.post(f"/actions/{proposal['id']}/reject", headers=bob).status_code == 409
+    assert client.post("/actions/act_missing/approve", headers=bob).status_code == 404
+
+    assert client.get("/audit", headers=bob).status_code == 403
+    trail = client.get(f"/audit?investigation_id={inv_id}", headers=ada).json()
+    assert {"investigation_started", "tool_call", "action_executed"} <= {r["kind"] for r in trail}
+    assert client.get("/audit/verify", headers=ada).json()["ok"] is True
+
+    # The approved rollback changed the deploy's status, and replay notices exactly that.
+    after = client.post(f"/investigations/{inv_id}/replay", headers=rita).json()
+    assert [d["tool"] for d in after["details"] if d["outcome"] == "differs"] == ["list_changes"]
+    assert (
+        client.post(
+            f"/investigations/{inv_id}/replay", headers=auth("mallory", "responder")
+        ).status_code
+        == 404
+    )

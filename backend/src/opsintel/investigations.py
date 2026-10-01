@@ -12,7 +12,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from opsintel import audit
 from opsintel.agent.investigator import AgentConfig, Investigator, TraceEvent
+from opsintel.agent.prompts import PROMPT_VERSION
 from opsintel.auth import Principal
 from opsintel.db.models import Investigation
 from opsintel.db.session import session_scope
@@ -89,6 +91,14 @@ class InvestigationService:
                     trace=[],
                 )
             )
+            audit.append(
+                s,
+                "investigation_started",
+                principal.subject,
+                principal.role,
+                {"question": question, "model": llm.model, "prompt_version": PROMPT_VERSION},
+                investigation_id=inv_id,
+            )
         self.bus.open(inv_id)  # subscribers arriving before the first event still follow it
         task = asyncio.create_task(self._run(inv_id, question, principal, llm))
         self._tasks.add(task)
@@ -102,6 +112,20 @@ class InvestigationService:
     async def _run(self, inv_id: str, question: str, principal: Principal, llm: LLMClient) -> None:
         def publish(event: TraceEvent) -> None:
             self.bus.publish(inv_id, event.as_dict())
+            if event.type == "llm_call":
+                with self.session_factory() as s:
+                    audit.append(
+                        s,
+                        "llm_call",
+                        principal.subject,
+                        principal.role,
+                        {**event.data, "prompt_version": PROMPT_VERSION},
+                        investigation_id=inv_id,
+                        ts=event.ts,
+                    )
+
+        # Tool calls made on behalf of this run are audited with its ID, model and prompts.
+        audit.audit_context.set(audit.AuditContext(inv_id, llm.model, PROMPT_VERSION))
 
         with self.session_factory() as s:
             now = simulated_now(s)
@@ -116,12 +140,26 @@ class InvestigationService:
                 row.report = result.report.model_dump(mode="json")
                 row.grounding = {**result.grounding.model_dump(), "ratio": result.grounding.ratio}
                 row.trace = [e.as_dict() for e in result.trace]
+                audit.append(
+                    s,
+                    "investigation_completed",
+                    principal.subject,
+                    principal.role,
+                    {
+                        "root_cause": result.report.root_cause.model_dump(),
+                        "grounding_ratio": result.grounding.ratio,
+                        "tokens": result.usage.total_tokens,
+                        "tool_calls": result.tool_calls,
+                    },
+                    investigation_id=inv_id,
+                )
                 row.stats = {
                     "prompt_tokens": result.usage.prompt_tokens,
                     "completion_tokens": result.usage.completion_tokens,
                     "tool_calls": result.tool_calls,
                     "llm_calls": result.llm_calls,
                     "latency_ms": result.latency_ms,
+                    "prompt_version": PROMPT_VERSION,
                     "stop_reason": result.stop_reason,
                 }
         except Exception as e:  # the API must record failures, not lose them
@@ -140,6 +178,14 @@ class InvestigationService:
                     row.status = "failed"
                     row.finished_at = datetime.now(UTC)
                     row.error = error
+                audit.append(
+                    s,
+                    "investigation_failed",
+                    principal.subject,
+                    principal.role,
+                    {"error": error},
+                    investigation_id=inv_id,
+                )
         finally:
             self.bus.close(inv_id)
 

@@ -9,15 +9,18 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 
-from opsintel import __version__
+from opsintel import __version__, actions
+from opsintel.audit import ToolCallAuditor, verify_chain
 from opsintel.auth import AuthError, Principal, verify_token
+from opsintel.db.models import AuditRecord
 from opsintel.db.session import get_engine, session_scope
 from opsintel.graph.build import rebuild_graph
 from opsintel.investigations import InvestigationService, can_view, summarize
 from opsintel.llm import make_llm
 from opsintel.rag.embeddings import make_embedder
+from opsintel.replay import replay_investigation
 from opsintel.simulator import SCENARIOS, generate
 from opsintel.simulator.loader import load
 from opsintel.tools import ToolRunner
@@ -26,9 +29,10 @@ from opsintel.tools import ToolRunner
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if not hasattr(app.state, "investigations"):
-        app.state.investigations = InvestigationService(
-            ToolRunner(session_scope, make_embedder), make_llm
+        runner = ToolRunner(
+            session_scope, make_embedder, observers=[ToolCallAuditor(session_scope)]
         )
+        app.state.investigations = InvestigationService(runner, make_llm)
     yield
     await app.state.investigations.wait_all()
 
@@ -72,7 +76,7 @@ def list_scenarios() -> list[dict[str, str]]:
 
 
 @app.post("/scenarios/{key}/load")
-def load_scenario(key: str, caller: Caller, seed: int = 42) -> dict[str, Any]:
+def load_scenario(key: str, caller: Caller, svc: Service, seed: int = 42) -> dict[str, Any]:
     """Admin only: replace the data with a freshly simulated scenario (demo control)."""
     if caller.role != "admin":
         raise HTTPException(403, "only admins can load scenarios")
@@ -81,7 +85,7 @@ def load_scenario(key: str, caller: Caller, seed: int = 42) -> dict[str, Any]:
     from datetime import UTC, datetime
 
     ds = generate(SCENARIOS[key], seed, datetime.now(UTC))
-    with session_scope() as s:
+    with svc.session_factory() as s:
         counts = load(s, ds)
         rebuild_graph(s)
     return {"scenario": key, "question": ds.question, "rows": counts}
@@ -139,3 +143,93 @@ async def investigation_events(inv_id: str, caller: Caller, svc: Service) -> Str
     return StreamingResponse(
         stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
     )
+
+
+# --- Approval queue -----------------------------------------------------------------------
+
+
+class Decision(BaseModel):
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+@app.get("/actions")
+def list_actions(
+    caller: Caller, svc: Service, status: str | None = None
+) -> list[dict[str, object]]:
+    """Responders and admins see the whole queue; others see their own proposals."""
+    with svc.session_factory() as s:
+        return [actions.as_dict(p) for p in actions.list_proposals(s, caller, status)]
+
+
+def _decide(
+    svc: InvestigationService, proposal_id: str, caller: Principal, approve: bool, body: Decision
+) -> dict[str, object]:
+    try:
+        with svc.session_factory() as s:
+            return actions.as_dict(actions.decide(s, caller, proposal_id, approve, body.comment))
+    except actions.Forbidden as e:
+        raise HTTPException(403, str(e)) from e
+    except actions.NotFound as e:
+        raise HTTPException(404, f"no proposal {e}") from e
+    except actions.InvalidTransition as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/actions/{proposal_id}/approve")
+def approve_action(
+    proposal_id: str, caller: Caller, svc: Service, body: Decision | None = None
+) -> dict[str, object]:
+    return _decide(svc, proposal_id, caller, True, body or Decision())
+
+
+@app.post("/actions/{proposal_id}/reject")
+def reject_action(
+    proposal_id: str, caller: Caller, svc: Service, body: Decision | None = None
+) -> dict[str, object]:
+    return _decide(svc, proposal_id, caller, False, body or Decision())
+
+
+# --- Audit and replay ------------------------------------------------------------------------
+
+
+@app.post("/investigations/{inv_id}/replay")
+def replay(inv_id: str, caller: Caller, svc: Service) -> dict[str, Any]:
+    _visible(svc, inv_id, caller)
+    return replay_investigation(svc.session_factory, svc.runner, inv_id)
+
+
+def _admin(caller: Principal) -> None:
+    if caller.role != "admin":
+        raise HTTPException(403, "the audit log is admin-only")
+
+
+@app.get("/audit")
+def audit_log(
+    caller: Caller, svc: Service, investigation_id: str | None = None, limit: int = 200
+) -> list[dict[str, Any]]:
+    _admin(caller)
+    stmt = select(AuditRecord).order_by(AuditRecord.seq.desc()).limit(min(limit, 1000))
+    if investigation_id:
+        stmt = stmt.where(AuditRecord.investigation_id == investigation_id)
+    with svc.session_factory() as s:
+        return [
+            {
+                "seq": r.seq,
+                "ts": r.ts,
+                "kind": r.kind,
+                "actor": r.actor,
+                "role": r.role,
+                "investigation_id": r.investigation_id,
+                "payload": r.payload,
+                "prev_hash": r.prev_hash,
+                "hash": r.hash,
+            }
+            for r in s.scalars(stmt)
+        ]
+
+
+@app.get("/audit/verify")
+def audit_verify(caller: Caller, svc: Service) -> dict[str, Any]:
+    _admin(caller)
+    with svc.session_factory() as s:
+        return vars(verify_chain(s))

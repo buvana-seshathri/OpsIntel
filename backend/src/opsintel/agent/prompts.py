@@ -35,3 +35,14 @@ citing their IDs. Include rejected hypotheses (red herrings) with the evidence t
 them out. If nothing is wrong, say so with root_cause.kind = "none". List any actions you
 queued with propose_action, with their act_ IDs.
 """
+
+
+def _version() -> str:
+    import hashlib
+
+    return hashlib.sha256((SYSTEM_PROMPT + FINAL_REPORT_PROMPT).encode()).hexdigest()[:12]
+
+
+# Recorded with every investigation and audit record, so results can be tied to the exact
+# prompts that produced them when comparing runs.
+PROMPT_VERSION = _version()

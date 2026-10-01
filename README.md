@@ -20,8 +20,8 @@ design decisions.
 | 3 | Entity graph (records, log and document extraction), traversal, blast radius | ✅ |
 | 4 | MCP server (12 tools), JWT auth, RBAC in the tool layer, action proposals | ✅ |
 | 5 | Agent loop over MCP, structured grounded reports, API with SSE trace | ✅ |
-| 6 | Audit log, approval queue, replay | next |
-| 7 | React dashboard | |
+| 6 | Hash-chained audit log, two-person approval queue, replay | ✅ |
+| 7 | React dashboard | next |
 | 8 | Eval harness and CI gating | |
 | 9 | Terraform + AWS | |
 
@@ -43,7 +43,9 @@ make test                     # needs an opsintel_test database, see below
 `docker compose exec db createdb -U opsintel opsintel_test`. Without the variable those tests
 are skipped and the rest still run.
 
-To use Groq, set `LLM_PROVIDER=groq`, `GROQ_API_KEY` and optionally `LLM_MODEL` in `.env`.
+To use Groq, set `LLM_PROVIDER=groq`, `GROQ_API_KEY` and optionally `LLM_MODEL` (default
+`openai/gpt-oss-120b`) in `.env`. In a cloud sandbox, `api.groq.com` must be on the network
+allowlist.
 
 ## Scenarios
 
@@ -178,6 +180,36 @@ API (bearer JWT):
 Investigations are visible only to the person who started them and to admins, since a
 report can contain anything its creator could read.
 
+## Audit, approvals and replay
+
+**Audit log.** Every tool call (allowed or denied), model call (tokens, latency, model,
+prompt version), investigation start/end and approval decision is appended to `audit_log`.
+Each row stores `sha256(previous hash || canonical JSON of the row)`, and a database
+trigger rejects UPDATE, DELETE and TRUNCATE. `opsintel audit verify` recomputes the chain
+and names the first record that was modified, removed or reordered; `opsintel audit head`
+prints the latest hash to anchor outside the database, since cutting off the tail is the
+one change a chain cannot show by itself.
+
+**Approval queue.** `propose_action` only queues. A responder or admin approves or
+rejects (`opsintel actions approve act_... --as bob`, or `POST /actions/{id}/approve`).
+Nobody can approve an action from their own investigation, decisions lock the row so an
+action can't run twice, and approved actions run through an `Executor`. The simulated one
+marks a rolled-back deploy as `rolled_back` and describes the other actions.
+
+**Replay.** `opsintel replay inv_...` re-runs an investigation's recorded tool calls as the
+original user and compares result digests with the audit log. With the same scenario
+loaded every read reproduces; after the data changes (for example, once the rollback is
+approved) the affected calls are reported as `differs`.
+
+### First live runs (Groq, `openai/gpt-oss-120b`, free tier)
+
+| Scenario | Root cause | Grounding | Tool calls | Tokens | Time |
+|---|---|---|---|---|---|
+| `bad_deploy_payments` | MATCH (`dep_…`, 90%) | 8/8 | 12 (budget hit) | 51k | 337 s |
+| `bad_deploy_payments` | MATCH, rollback queued | 7/7 | 11 | 64k | 402 s |
+
+Most of the time is spent waiting out free-tier per-minute rate limits.
+
 ## Layout
 
 ```
@@ -191,6 +223,7 @@ backend/
     auth.py      roles, permissions, JWT issue/verify
     agent/       investigator loop, prompts, report schema, grounding check
     investigations.py, events.py   background runs, persistence, live event bus
+    audit.py, actions.py, replay.py  hash-chained audit, approvals, replay
     llm/         provider-agnostic LLM interface (Groq/OpenAI-compatible, mock)
     rag/         corpus, chunking, embedders, ingestion, hybrid search
     simulator/   company topology, simulation engine, scenarios, loader
