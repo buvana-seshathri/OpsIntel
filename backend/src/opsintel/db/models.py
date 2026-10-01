@@ -239,3 +239,33 @@ class Chunk(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
+
+
+# --- Entity graph ---------------------------------------------------------------------
+
+
+class Entity(Base):
+    """A typed node. IDs are "<type>:<natural id>" for infrastructure (service:payments-svc,
+    host:payments-svc-02, error_code:ENOSPC) and the row ID for records (dep_..., ord_...)."""
+
+    __tablename__ = "entities"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    type: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(Text)
+    properties: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+
+class Edge(Base):
+    __tablename__ = "edges"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    src: Mapped[str] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"))
+    dst: Mapped[str] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"))
+    relation: Mapped[str] = mapped_column(String(32))
+    origin: Mapped[str] = mapped_column(String(16))  # record | event | document
+    properties: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+    __table_args__ = (
+        Index("ix_edges_src_relation", "src", "relation"),
+        Index("ix_edges_dst_relation", "dst", "relation"),
+        Index("uq_edges_src_dst_relation", "src", "dst", "relation", unique=True),
+    )

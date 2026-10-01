@@ -17,8 +17,8 @@ design decisions.
 | 0 | Monorepo scaffold, docker-compose, lint/test CI | ✅ |
 | 1 | Data model and migrations, synthetic company, simulator with 8 incident scenarios + a healthy control | ✅ |
 | 2 | Runbook/postmortem corpus, chunking, local embeddings, hybrid search with ACLs | ✅ |
-| 3 | Entity graph and traversal tools | next |
-| 4 | MCP server, JWT auth, RBAC | |
+| 3 | Entity graph (records, log and document extraction), traversal, blast radius | ✅ |
+| 4 | MCP server, JWT auth, RBAC | next |
 | 5 | Agent loop, structured reports, SSE trace | |
 | 6 | Audit log, approval queue, replay | |
 | 7 | React dashboard | |
@@ -78,6 +78,25 @@ citable evidence.
 Groq has no embeddings API, so embeddings are local: `EMBEDDER=fastembed` (default) runs
 BAAI/bge-small-en-v1.5 on CPU; `EMBEDDER=hashing` is an offline lexical fallback used by tests.
 
+## Entity graph
+
+`entities` and `edges` are rebuilt after every scenario load or document ingest from three
+origins:
+
+- **records**: team `owns` service, service `depends_on` service (hard/soft), service
+  `runs_on` host, deploy `deployed_to` service, config change `changed` service, and order,
+  payment, shipment and customer links. Customer nodes carry no PII.
+- **events**: service/host `emitted` error code (count, first/last seen, sample event IDs);
+  caller `saw_failures_from` upstream.
+- **documents**: document `covers` service, and `mentions` service/host/error code, with the
+  chunk IDs that mention it.
+
+So a culprit deploy, the error code it causes, and the runbook for that error code are
+connected. Traversals: `trace_dependencies` and `blast_radius` are recursive CTEs that mark
+whether every hop is a hard dependency (failure propagates) or not (degrades only);
+`find_path` is a bounded BFS. Try `uv run opsintel graph host:payments-svc-02` after loading
+`host_disk_full`.
+
 ## Layout
 
 ```
@@ -85,6 +104,7 @@ backend/
   src/opsintel/
     api/         FastAPI app
     db/          SQLAlchemy models, sessions
+    graph/       entity graph builder and traversal queries
     llm/         provider-agnostic LLM interface (Groq/OpenAI-compatible, mock)
     rag/         corpus, chunking, embedders, ingestion, hybrid search
     simulator/   company topology, simulation engine, scenarios, loader

@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 
 from opsintel.db.session import session_scope
+from opsintel.graph.build import rebuild_graph
 from opsintel.simulator import SCENARIOS, generate
 from opsintel.simulator.loader import load
 
@@ -55,11 +56,16 @@ def simulate(
     ds = generate(SCENARIOS[scenario], seed, end)
     with session_scope() as session:
         counts = load(session, ds)
+        graph = rebuild_graph(session)
     typer.echo(
         f"Loaded {scenario} (seed {seed}), window {ds.window_start:%H:%M}-{ds.window_end:%H:%M} UTC"
     )
     for table, n in counts.items():
         typer.echo(f"  {table:22s} {n:6d}")
+    typer.echo(
+        f"  graph: {graph['edges']} edges, "
+        f"{sum(v for k, v in graph.items() if k != 'edges')} entities"
+    )
     typer.echo(f"\nQuestion: {ds.question}")
 
 
@@ -72,6 +78,7 @@ def ingest_docs() -> None:
     embedder = make_embedder()
     with session_scope() as session:
         r = ingest_corpus(session, embedder)
+        rebuild_graph(session)
     typer.echo(
         f"Embedder {embedder.name}: {r.added} added, {r.updated} updated, "
         f"{r.unchanged} unchanged, {r.removed} removed, {r.chunks} chunks written"
@@ -95,3 +102,24 @@ def search(
             f"{h.score:.4f}  vec#{h.vector_rank or '-':<3} kw#{h.keyword_rank or '-':<3} "
             f"{h.chunk_id}  [{h.heading}]"
         )
+
+
+@app.command()
+def graph(
+    entity: Annotated[str, typer.Argument(help="Entity ID, e.g. service:payments-svc")],
+    to: Annotated[str | None, typer.Option(help="Show the shortest path to this entity.")] = None,
+) -> None:
+    """Inspect the entity graph: neighbours, blast radius, or a path."""
+    import json
+
+    from opsintel.graph.queries import blast_radius, find_path, get_entity
+
+    with session_scope() as session:
+        if to:
+            out: object = find_path(session, entity, to)
+        else:
+            out = {
+                "entity": get_entity(session, entity),
+                "blast_radius": blast_radius(session, entity),
+            }
+    typer.echo(json.dumps(out, indent=2, default=str))
