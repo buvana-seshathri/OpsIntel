@@ -7,6 +7,7 @@ from pydantic import BaseModel, SecretStr
 
 from opsintel.config import Settings
 from opsintel.llm import (
+    MalformedToolCall,
     Message,
     MockLLM,
     StructuredOutputError,
@@ -122,5 +123,6 @@ async def test_tool_call_without_tools_becomes_repairable_text(monkeypatch: Any)
     resp = await client.complete([Message(role="user", content="json please")], json_mode=True)
     assert resp.message.content == '[attempted tool call] {"name": "x"}'
     tool = ToolSpec(name="x", description="d", parameters={"type": "object"})
-    with pytest.raises(BadRequestError):  # with tools offered it is a real error
+    with pytest.raises(MalformedToolCall) as info:  # with tools offered, the agent retries
         await client.complete([Message(role="user", content="go")], tools=[tool])
+    assert info.value.generation == '{"name": "x"}'

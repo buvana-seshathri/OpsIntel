@@ -65,6 +65,15 @@ class StructuredOutputError(Exception):
     pass
 
 
+class MalformedToolCall(Exception):
+    """The model produced a tool call the provider could not parse (Groq rejects the whole
+    request with 400 tool_use_failed). Callers can show the model its output and retry."""
+
+    def __init__(self, generation: str) -> None:
+        super().__init__(f"malformed tool call: {generation[:300]}")
+        self.generation = generation
+
+
 T = TypeVar("T", bound=BaseModel)
 
 

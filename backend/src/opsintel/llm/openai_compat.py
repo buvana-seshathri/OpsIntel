@@ -8,7 +8,7 @@ from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
-from opsintel.llm.base import LLMResponse, Message, ToolCall, ToolSpec, Usage
+from opsintel.llm.base import LLMResponse, MalformedToolCall, Message, ToolCall, ToolSpec, Usage
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
@@ -61,8 +61,10 @@ class OpenAICompatClient:
             resp = await self._client.chat.completions.create(**kwargs)
         except BadRequestError as e:
             failed = _failed_tool_generation(e)
-            if failed is None or tools:
+            if failed is None:
                 raise
+            if tools:
+                raise MalformedToolCall(failed) from e
             # Groq rejects a reply that calls a tool when none were offered (seen with
             # gpt-oss when asked for the final JSON). Hand it back as an ordinary invalid
             # answer so the caller's repair loop can ask again.

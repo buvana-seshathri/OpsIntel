@@ -512,8 +512,12 @@ def propose_action(
     target: Annotated[
         str,
         Field(
-            description="Entity the action applies to, e.g. dep_..., "
-            "cfg_..., host:..., service:..., team:..."
+            description=(
+                "Entity ID exactly as tools return it. rollback_deploy: the dep_ ID; "
+                "revert_config_change: the cfg_ ID; failover_provider: the standby provider "
+                "to switch TO (service:...); rotate_certificate and scale_service: the "
+                "service:... that needs it; drain_host: the host:...; page_team: the team:..."
+            )
         ),
     ],
     rationale: Annotated[str, Field(min_length=10, max_length=2000)],

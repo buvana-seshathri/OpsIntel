@@ -2,6 +2,7 @@ from opsintel.config import Settings, get_settings
 from opsintel.llm.base import (
     LLMClient,
     LLMResponse,
+    MalformedToolCall,
     Message,
     StructuredOutputError,
     ToolCall,
@@ -15,6 +16,7 @@ from opsintel.llm.openai_compat import GROQ_BASE_URL, OpenAICompatClient
 __all__ = [
     "LLMClient",
     "LLMResponse",
+    "MalformedToolCall",
     "Message",
     "MockLLM",
     "StructuredOutputError",

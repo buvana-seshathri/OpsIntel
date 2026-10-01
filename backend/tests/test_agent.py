@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from opsintel.agent.investigator import AgentConfig, Investigator
 from opsintel.auth import Principal
 from opsintel.db.models import ActionProposal
-from opsintel.llm import Message, MockLLM, ToolCall
+from opsintel.llm import MalformedToolCall, Message, MockLLM, ToolCall
 from opsintel.mcp_server.server import create_server
 from opsintel.rag.embeddings import HashingEmbedder
 from opsintel.tools import ToolRunner
@@ -129,3 +129,25 @@ async def test_context_is_compacted_to_fit_the_budget(runner: ToolRunner) -> Non
     assert result.report.root_cause.entity_id == DS.ground_truth.root_cause_entity
     last_prompt = llm.calls[-1]
     assert any((m.content or "").startswith("<compacted") for m in last_prompt)
+
+
+async def test_malformed_tool_call_is_retried(runner: ToolRunner) -> None:
+    script = ScriptedSRE()
+    calls = {"n": 0}
+
+    class Flaky(MockLLM):
+        async def complete(self, messages: Any, tools: Any = None, **kw: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 2:  # the second step's tool call comes back unparseable
+                raise MalformedToolCall('{"name": "get_metrics", "arguments": {"service":')
+            return await super().complete(messages, tools, **kw)
+
+    llm = Flaky(script)
+    result = await agent(runner, RESPONDER, llm).run(DS.question, DS.window_end)
+    assert result.report.root_cause.entity_id == DS.ground_truth.root_cause_entity
+    errors = [e for e in result.trace if e.type == "tool_error"]
+    assert errors and "malformed tool call" in errors[0].data["error"]
+    correction = next(
+        m for m in llm.calls[2] if m.role == "user" and "could not be parsed" in (m.content or "")
+    )
+    assert "get_metrics" in (correction.content or "")

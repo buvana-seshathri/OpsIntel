@@ -19,7 +19,15 @@ from mcp import Client
 from opsintel.agent.prompts import FINAL_REPORT_PROMPT, PROMPT_VERSION, SYSTEM_PROMPT
 from opsintel.agent.report import Grounding, InvestigationReport, check_grounding, ids_in
 from opsintel.auth import Principal
-from opsintel.llm import LLMClient, LLMResponse, Message, ToolSpec, Usage, complete_structured
+from opsintel.llm import (
+    LLMClient,
+    LLMResponse,
+    MalformedToolCall,
+    Message,
+    ToolSpec,
+    Usage,
+    complete_structured,
+)
 from opsintel.tools import REGISTRY
 
 EventType = Literal[
@@ -67,6 +75,7 @@ class AgentConfig:
     context_token_budget: int = 5000
     chars_per_token: float = 3.2  # conservative for JSON-heavy text
     keep_recent_results: int = 2  # never compact the newest tool results
+    malformed_call_retries: int = 2  # per investigation
 
 
 def _compact_schema(schema: Any) -> Any:
@@ -152,6 +161,7 @@ class Investigator:
                 Message(role="user", content=question),
             ]
             tool_calls = 0
+            malformed = 0
             stop: Literal["concluded", "tool_budget"] = "concluded"
             spec_chars = sum(len(s.model_dump_json()) for s in specs)
             while True:
@@ -159,7 +169,26 @@ class Investigator:
                     stop = "tool_budget"
                     break
                 self._fit_context(messages, spec_chars, run)
-                resp = await self.llm.complete(messages, tools=specs)
+                try:
+                    resp = await self.llm.complete(messages, tools=specs)
+                except MalformedToolCall as e:
+                    if malformed >= cfg.malformed_call_retries:
+                        raise
+                    malformed += 1
+                    run.emit(
+                        "tool_error", id=f"malformed_{malformed}", tool="(unparsed)", error=str(e)
+                    )
+                    messages.append(
+                        Message(
+                            role="user",
+                            content=(
+                                "Your last tool call could not be parsed: its arguments were not "
+                                f"valid JSON.\nIt was: {e.generation[:500]}\n"
+                                "Call the tool again with a valid JSON object of arguments."
+                            ),
+                        )
+                    )
+                    continue
                 run.count(resp, "step")
                 messages.append(resp.message)
                 if resp.message.content:

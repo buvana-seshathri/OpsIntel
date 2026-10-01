@@ -41,7 +41,11 @@ class RootCause(BaseModel):
     ]
     entity_id: str | None = Field(
         default=None,
-        description="The culprit: dep_/cfg_ ID, or service:/host: entity. null if none.",
+        description=(
+            "The culprit, as an ID exactly as tools return it: a dep_/cfg_ ID for a change, "
+            "service:<id> for a failing dependency or saturated service, host:<id> for a "
+            "single bad host. null only when nothing is wrong."
+        ),
     )
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -59,7 +63,9 @@ ActionType = Literal[
 
 class RecommendedAction(BaseModel):
     type: ActionType
-    target: str = Field(description="dep_/cfg_ ID, or service:/host:/team: entity")
+    target: str = Field(
+        description="Entity ID as tools return it; for failover_provider, the provider to switch TO"
+    )
     rationale: str
     evidence_ids: list[str] = []
     proposal_id: str | None = Field(
